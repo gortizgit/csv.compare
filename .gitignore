@@ -1,0 +1,11 @@
+﻿__pycache__/
+*.pyc
+.venv/
+*.csv
+csv_compare_report_*/
+migration_check_*/
+value_differences.csv
+keys_only_in_*.csv
+duplicate_keys_in_*.csv
+.DS_Store
+Thumbs.db
