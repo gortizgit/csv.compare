@@ -28,6 +28,8 @@ python csv_compare.py --left path/to/A.csv --right path/to/B.csv
 
 upython .\csv_compare.py -l .\Informatica.csv -r .\DOMO.csv --key Membership_Number
 
+python .\csv_compare.py -l .\Informatica.csv -r .\DOMO.csv --key Membership_Number --display-decimals 2
+
 ```
 3) Optional flags:
 ```bash
