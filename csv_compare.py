@@ -6,7 +6,12 @@ csv_compare.py — Compare two CSV files for schema & data equality (with subset
 - If sizes differ, checks whether the smaller dataset is a subset of the larger.
 - Optionally compare by a key; if not provided, auto-detects a likely key.
 Outputs a report folder with summary.md and CSVs for differences.
+
+Note:
+- Comparison is strict (no numeric tolerance, no equality by rounding).
+- Differences are *displayed* with numeric values rounded to --display-decimals (default 2).
 """
+
 import argparse
 import os
 import sys
@@ -63,6 +68,16 @@ def detect_key(dfA, dfB, max_candidates=3):
     if pairs:
         return pairs[:max_candidates]
     return []
+
+def fmt_display(x, decimals):
+    """Format numeric-like strings to fixed decimals for OUTPUT ONLY."""
+    if pd.isna(x):
+        return ""
+    try:
+        num = float(x)
+        return f"{num:.{decimals}f}"
+    except Exception:
+        return str(x)
 
 def compare(args):
     out_dir = args.out or f"csv_compare_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -131,33 +146,25 @@ def compare(args):
         f.write("\n")
 
     # Data comparison
-    # If no key, compare by full-row tuples across common columns
     if key_cols is None:
-        # Build tuple rows for hashing
+        # Full-row (set) comparison across common columns
         A_tuples = A.apply(lambda r: tuple(r.fillna(pd.NA).astype(object).tolist()), axis=1)
         B_tuples = B.apply(lambda r: tuple(r.fillna(pd.NA).astype(object).tolist()), axis=1)
-
         setA = set(A_tuples.tolist())
         setB = set(B_tuples.tolist())
 
         only_in_A = setA - setB
         only_in_B = setB - setA
 
-        # Save diffs
-        onlyA_path = os.path.join(out_dir, "rows_only_in_A.csv")
-        onlyB_path = os.path.join(out_dir, "rows_only_in_B.csv")
         if only_in_A:
-            pd.DataFrame(list(only_in_A), columns=common_cols).to_csv(onlyA_path, index=False)
+            pd.DataFrame(list(only_in_A), columns=common_cols).to_csv(os.path.join(out_dir, "rows_only_in_A.csv"), index=False)
         if only_in_B:
-            pd.DataFrame(list(only_in_B), columns=common_cols).to_csv(onlyB_path, index=False)
+            pd.DataFrame(list(only_in_B), columns=common_cols).to_csv(os.path.join(out_dir, "rows_only_in_B.csv"), index=False)
 
-        subset_note = ""
         if len(A) <= len(B):
-            missing_from_B = len(only_in_A)
-            subset_note = f"A subset of B? {'YES' if missing_from_B == 0 else 'NO'} (rows in A not in B: {missing_from_B})"
+            subset_note = f"A subset of B? {'YES' if len(only_in_A)==0 else 'NO'} (rows in A not in B: {len(only_in_A)})"
         else:
-            missing_from_A = len(only_in_B)
-            subset_note = f"B subset of A? {'YES' if len(missing_from_A) == 0 else 'NO'} (rows in B not in A: {missing_from_A})"
+            subset_note = f"B subset of A? {'YES' if len(only_in_B)==0 else 'NO'} (rows in B not in A: {len(only_in_B)})"
 
         with open(summary_path, "a", encoding="utf-8") as f:
             f.write("## Data (Full-row comparison across common columns)\n")
@@ -172,7 +179,7 @@ def compare(args):
                 f.write(f"- See `rows_only_in_B.csv` for examples.\n")
 
     else:
-        # Keyed comparison
+        # Keyed comparison (strict), with formatted output
         A_keyed = A.set_index(key_cols, drop=False)
         B_keyed = B.set_index(key_cols, drop=False)
 
@@ -180,13 +187,10 @@ def compare(args):
         keys_only_in_A = set(A_keyed.index) - set(B_keyed.index)
         keys_only_in_B = set(B_keyed.index) - set(A_keyed.index)
 
-        # Save key presence diffs
-        only_keys_A_path = os.path.join(out_dir, "keys_only_in_A.csv")
-        only_keys_B_path = os.path.join(out_dir, "keys_only_in_B.csv")
         if keys_only_in_A:
-            pd.DataFrame(list(keys_only_in_A), columns=key_cols).to_csv(only_keys_A_path, index=False)
+            pd.DataFrame(list(keys_only_in_A), columns=key_cols).to_csv(os.path.join(out_dir, "keys_only_in_A.csv"), index=False)
         if keys_only_in_B:
-            pd.DataFrame(list(keys_only_in_B), columns=key_cols).to_csv(only_keys_B_path, index=False)
+            pd.DataFrame(list(keys_only_in_B), columns=key_cols).to_csv(os.path.join(out_dir, "keys_only_in_B.csv"), index=False)
 
         # Compare values where keys exist in both
         common_keys = list(set(A_keyed.index) & set(B_keyed.index))
@@ -200,45 +204,29 @@ def compare(args):
             for col in common_cols:
                 va = rowA[col]
                 vb = rowB[col]
-                # 1) Ambos NA => iguales
+                # Equal if both NA
                 if pd.isna(va) and pd.isna(vb):
                     continue
-
-                iguales = False
-                # 2) Si uno es NA y el otro no => diferentes (deja iguales=False)
-                if pd.isna(va) != pd.isna(vb):
-                    iguales = False
+                # If one NA and the other not -> difference
+                if pd.isna(va) or pd.isna(vb):
+                    pass  # keep as difference
                 else:
-                    # 3) Intento numérico con redondeo/tolerancia si se solicitaron
-                    try:
-                        a_num = float(va)
-                        b_num = float(vb)
-                        # Redondeo exacto
-                        if hasattr(args, "round_decimals") and args.round_decimals is not None:
-                            if round(a_num, args.round_decimals) == round(b_num, args.round_decimals):
-                                iguales = True
-                        # Tolerancia numérica
-                        if not iguales and hasattr(args, "numeric_tol") and args.numeric_tol is not None:
-                            if abs(a_num - b_num) <= args.numeric_tol:
-                                iguales = True
-                    except Exception:
-                        # No eran numéricos: sigue comparación string
-                        pass
+                    # Strict compare (no tolerance)
+                    if str(va) == str(vb):
+                        continue  # equal; no diff
 
-                    # 4) Comparación como texto si aún no son iguales
-                    if not iguales and va == vb:
-                        iguales = True
+                # record difference with formatted output
+                diff_rec = {c: rowA[c] for c in key_cols}
+                diff_rec.update({
+                    "column": col,
+                    "A": fmt_display(va, args.display_decimals),
+                    "B": fmt_display(vb, args.display_decimals)
+                })
+                diffs.append(diff_rec)
 
-                if not iguales:
-                    diff_rec = {c: rowA[c] for c in key_cols}
-                    diff_rec.update({"column": col, "A": va, "B": vb})
-                    diffs.append(diff_rec)
-
-        diffs_path = os.path.join(out_dir, "value_differences.csv")
         if diffs:
-            pd.DataFrame(diffs).to_csv(diffs_path, index=False)
+            pd.DataFrame(diffs).to_csv(os.path.join(out_dir, "value_differences.csv"), index=False)
 
-        subset_note = ""
         if len(A_keyed) <= len(B_keyed):
             subset_note = f"A keys subset of B? {'YES' if len(keys_only_in_A)==0 else 'NO'} (keys only in A: {len(keys_only_in_A)})"
         else:
@@ -254,9 +242,9 @@ def compare(args):
                 f.write(f"- See `keys_only_in_A.csv`.\n")
             if keys_only_in_B:
                 f.write(f"- See `keys_only_in_B.csv`.\n")
-            f.write(f"- Value differences on common keys: {len(diffs)}\n")
+            f.write(f"- Value differences on common keys (rows): {len(diffs)}\n")
             if diffs:
-                f.write(f"- See `value_differences.csv` for per-column mismatches.\n")
+                f.write(f"- See `value_differences.csv` for per-column mismatches (values formatted to {args.display_decimals} decimals where numeric).\n")
             f.write(f"- {subset_note}\n")
 
     print(f"[OK] Report generated at: {out_dir}")
@@ -274,11 +262,9 @@ def main():
     ap.add_argument("--no-trim", action="store_true", help="Do NOT trim whitespace")
     ap.add_argument("--encoding", default="utf-8", help="File encoding (default utf-8)")
     ap.add_argument("--out", "-o", help="Output folder for the report")
-    # ---- new flags for numeric comparison ----
-    ap.add_argument("--round-decimals", type=int, default=None,
-                    help="Round numeric values to N decimals before equality check (e.g., 2)")
-    ap.add_argument("--numeric-tol", type=float, default=None,
-                    help="Numeric tolerance: abs(A-B) <= tol is considered equal (e.g., 0.005)")
+    # Display formatting (does not affect equality)
+    ap.add_argument("--display-decimals", type=int, default=2,
+                    help="Format numeric values in outputs to N decimals (display only, default 2)")
     args = ap.parse_args()
     compare(args)
 
